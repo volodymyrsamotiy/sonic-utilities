@@ -533,6 +533,13 @@ class PackageManager:
 
         # After all checks are passed we proceed to actual upgrade
 
+        service_create_opts = {
+            'register_feature': False,
+        }
+        service_remove_opts = {
+            'deregister_feature': False,
+        }
+
         try:
             with contextlib.ExitStack() as exits:
                 self._uninstall_cli_plugins(old_package)
@@ -541,14 +548,19 @@ class PackageManager:
                 source.install(new_package)
                 exits.callback(rollback(source.uninstall, new_package))
 
-                if self.feature_registry.is_feature_enabled(old_feature):
+                feature_enabled = self.feature_registry.is_feature_enabled(old_feature)
+
+                if feature_enabled:
+                    self._systemctl_action(new_package, 'disable')
+                    exits.callback(rollback(self._systemctl_action,
+                                            old_package, 'enable'))
                     self._systemctl_action(old_package, 'stop')
                     exits.callback(rollback(self._systemctl_action,
                                             old_package, 'start'))
 
-                self.service_creator.remove(old_package, deregister_feature=False)
+                self.service_creator.remove(old_package, **service_remove_opts)
                 exits.callback(rollback(self.service_creator.create, old_package,
-                                        register_feature=False))
+                                        **service_create_opts))
 
                 # Clean containers based on the old image
                 containers = self.docker.ps(filters={'ancestor': old_package.image_id},
@@ -556,9 +568,9 @@ class PackageManager:
                 for container in containers:
                     self.docker.rm(container.id, force=True)
 
-                self.service_creator.create(new_package, register_feature=False)
+                self.service_creator.create(new_package, **service_create_opts)
                 exits.callback(rollback(self.service_creator.remove, new_package,
-                                        register_feature=False))
+                                        **service_remove_opts))
 
                 self.service_creator.generate_shutdown_sequence_files(
                     self._get_installed_packages_and(new_package)
@@ -568,10 +580,22 @@ class PackageManager:
                     self._get_installed_packages_and(old_package))
                 )
 
-                if self.feature_registry.is_feature_enabled(new_feature):
+                if feature_enabled:
+                    self._systemctl_action(new_package, 'enable')
+                    exits.callback(rollback(self._systemctl_action,
+                                            old_package, 'disable'))
                     self._systemctl_action(new_package, 'start')
                     exits.callback(rollback(self._systemctl_action,
                                             new_package, 'stop'))
+
+                # Update feature configuration after we have started new service.
+                # If we place it before the above, our service start/stop will
+                # interfere with hostcfgd in rollback path leading to a service
+                # running with new image and not the old one.
+                self.feature_registry.update(old_package.manifest, new_package.manifest)
+                exits.callback(rollback(
+                    self.feature_registry.update, new_package.manifest, old_package.manifest)
+                )
 
                 if not skip_host_plugins:
                     self._install_cli_plugins(new_package)
