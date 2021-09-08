@@ -505,7 +505,6 @@ class PackageManager:
             )
 
         old_feature = old_package.manifest['service']['name']
-        new_feature = new_package.manifest['service']['name']
         old_version = old_package.manifest['package']['version']
         new_version = new_package.manifest['package']['version']
 
