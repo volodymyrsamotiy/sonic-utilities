@@ -71,7 +71,7 @@ class TestIntIp(object):
                                    ["Ethernet2", "192.168.0.1/24"], obj=obj)
             print(result.exit_code, result.output)
             assert result.exit_code != 0
-            assert "Error: Cannot remove the last IP entry of interface Ethernet2. A static ip route is still bound to the RIF." in result.output
+            assert "Error: Cannot remove the last IP entry of interface Ethernet2. A static route is still bound to the RIF." in result.output
             assert mock_run_command.call_count == 0
 
         with mock.patch('utilities_common.cli.run_command') as mock_run_command:
@@ -79,7 +79,7 @@ class TestIntIp(object):
                                    ["Ethernet8", "192.168.3.1/24"], obj=obj)
             print(result.exit_code, result.output)
             assert result.exit_code != 0
-            assert "Error: Cannot remove the last IP entry of interface Ethernet8. A static ipv6 route is still bound to the RIF." in result.output
+            assert "Error: Cannot remove the last IP entry of interface Ethernet8. A static route is still bound to the RIF." in result.output
             assert mock_run_command.call_count == 0
 
         with mock.patch('utilities_common.cli.run_command') as mock_run_command:
@@ -87,7 +87,7 @@ class TestIntIp(object):
                                    ["Vlan2", "192.168.1.1/21"], obj=obj)
             print(result.exit_code, result.output)
             assert result.exit_code != 0
-            assert "Error: Cannot remove the last IP entry of interface Vlan2. A static ip route is still bound to the RIF." in result.output
+            assert "Error: Cannot remove the last IP entry of interface Vlan2. A static route is still bound to the RIF." in result.output
             assert mock_run_command.call_count == 0
 
         with mock.patch('utilities_common.cli.run_command') as mock_run_command:
@@ -95,7 +95,7 @@ class TestIntIp(object):
                                    ["PortChannel2", "10.0.0.56/31"], obj=obj)
             print(result.exit_code, result.output)
             assert result.exit_code != 0
-            assert "Error: Cannot remove the last IP entry of interface PortChannel2. A static ip route is still bound to the RIF." in result.output
+            assert "Error: Cannot remove the last IP entry of interface PortChannel2. A static route is still bound to the RIF." in result.output
             assert mock_run_command.call_count == 0
 
         with mock.patch('utilities_common.cli.run_command') as mock_run_command:
@@ -146,7 +146,7 @@ class TestIntIpMultiasic(object):
                                    ["Ethernet2", "192.168.0.1/24"], obj=obj)
             print(result.exit_code, result.output)
             assert result.exit_code != 0
-            assert "Error: Cannot remove the last IP entry of interface Ethernet2. A static ip route is still bound to the RIF." in result.output
+            assert "Error: Cannot remove the last IP entry of interface Ethernet2. A static route is still bound to the RIF." in result.output
             assert mock_run_command.call_count == 0
 
         with mock.patch('utilities_common.cli.run_command') as mock_run_command:
@@ -154,5 +154,5 @@ class TestIntIpMultiasic(object):
                                    ["Ethernet8", "192.168.3.1/24"], obj=obj)
             print(result.exit_code, result.output)
             assert result.exit_code != 0
-            assert "Error: Cannot remove the last IP entry of interface Ethernet8. A static ipv6 route is still bound to the RIF." in result.output
+            assert "Error: Cannot remove the last IP entry of interface Ethernet8. A static route is still bound to the RIF." in result.output
             assert mock_run_command.call_count == 0

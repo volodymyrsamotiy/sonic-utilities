@@ -43,7 +43,7 @@ from . import vlan
 from . import vxlan
 from . import plugins
 from .config_mgmt import ConfigMgmtDPB
-from . import mclag 
+from . import mclag
 
 # mock masic APIs for unit test
 try:
@@ -332,18 +332,20 @@ def interface_name_to_alias(config_db, interface_name):
 
     return None
 
-def interface_ipaddr_dependent_on_interface(config_db, interface_name):
-    """Get table keys including ipaddress
+def get_interface_ipaddresses(config_db, interface_name):
+    """Get IP addresses attached to interface
     """
-    data = []
+    ipaddresses = set()
     table_name = get_interface_table_name(interface_name)
-    if table_name == "":
-        return data
+
     keys = config_db.get_keys(table_name)
     for key in keys:
-        if interface_name in key and len(key) == 2:
-            data.append(key)
-    return data
+        if isinstance(key, tuple) and len(key) == 2:
+            iface, ipaddr = key
+            if iface == interface_name:
+                ipaddresses.add(ipaddress.ip_interface(ipaddr))
+
+    return ipaddresses
 
 def is_interface_bind_to_vrf(config_db, interface_name):
     """Get interface if bind to vrf or not
@@ -437,8 +439,9 @@ def del_interface_bind_to_vrf(config_db, vrf_name):
         if interface_dict:
             for interface_name in interface_dict:
                 if 'vrf_name' in interface_dict[interface_name] and vrf_name == interface_dict[interface_name]['vrf_name']:
-                    interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
-                    for interface_del in interface_dependent:
+                    interface_ipaddresses = get_interface_ipaddresses(config_db, interface_name)
+                    for ipaddress in interface_ipaddresses:
+                        interface_del = (interface_name, str(ipaddress))
                         config_db.set_entry(table_name, interface_del, None)
                     config_db.set_entry(table_name, interface_name, None)
 
@@ -498,16 +501,12 @@ def set_interface_naming_mode(mode):
     f.close()
     click.echo("Please logout and log back in for changes take effect.")
 
-def get_intf_ipv6_link_local_mode(ctx, interface_name, table_name):
-    config_db = ctx.obj["config_db"]
+def is_interface_ipv6_link_local_only(config_db, interface_name):
+    table_name = get_interface_table_name(interface_name)
     intf = config_db.get_table(table_name)
     if interface_name in intf:
-        if 'ipv6_use_link_local_only' in intf[interface_name]:
-            return intf[interface_name]['ipv6_use_link_local_only']
-        else:
-            return "disable"
-    else:
-        return ""
+        return intf[interface_name].get('ipv6_use_link_local_only') == "enable"
+    return False
 
 def _is_neighbor_ipaddress(config_db, ipaddress):
     """Returns True if a neighbor has the IP address <ipaddress>, False if not
@@ -822,22 +821,6 @@ def validate_mirror_session_config(config_db, session_name, dst_port, src_port, 
 
     return True
 
-def validate_ip_mask(ctx, ip_addr):
-    split_ip_mask = ip_addr.split("/")
-    # Check if the IP address is correct or if there are leading zeros.
-    ip_obj = ipaddress.ip_address(split_ip_mask[0])
-
-    # Check if the mask is correct
-    mask_range = 33 if isinstance(ip_obj, ipaddress.IPv4Address) else 129
-    # If mask is not specified
-    if len(split_ip_mask) < 2:
-        return 0
-
-    if not int(split_ip_mask[1]) in range(1, mask_range):
-        return 0
-
-    return str(ip_obj) + '/' + str(int(split_ip_mask[1]))
-
 def cli_sroute_to_config(ctx, command_str, strict_nh = True):
     if len(command_str) < 2 or len(command_str) > 9:
         ctx.fail("argument is not in pattern prefix [vrf <vrf_name>] <A.B.C.D/M> nexthop <[vrf <vrf_name>] <A.B.C.D>>|<dev <dev_name>>!")
@@ -947,6 +930,58 @@ def cache_arp_entries():
         restore_flag_file = os.path.join(cache_dir, 'needs-restore')
         open(restore_flag_file, 'w').close()
     return success
+
+def has_static_routes_attached(interface_name, namespace=None):
+    """ Check if static route is attached to interface. """
+
+    ip_versions = [ "ip", "ipv6"]
+    for ip_ver in ip_versions:
+        cmd = "show {} route vrf all static".format(ip_ver)
+        if namespace:
+            output = bgp_util.run_bgp_command(cmd, namespace)
+        else:
+            output = bgp_util.run_bgp_command(cmd)
+
+        if output:
+            if any(interface_name in output_line for output_line in output.splitlines()):
+                return True
+    return False
+
+def flush_ip_address_in_kernel(interface_name, ip_addr, namespace=None):
+    if namespace:
+        command = "sudo ip netns exec {} ip neigh flush dev {} {}".format(namespace, interface_name, ip_addr)
+    else:
+        command = "ip neigh flush dev {} {}".format(interface_name, ip_addr)
+    clicommon.run_command(command)
+
+def can_remove_router_interface(config_db, interface_name):
+    interface_addresses = get_interface_ipaddresses(config_db, interface_name)
+    is_bound_to_vrf = is_interface_bind_to_vrf(config_db, interface_name)
+    is_ipv6_link_local_enabled = is_interface_ipv6_link_local_only(config_db, interface_name)
+    can_remove = not (interface_addresses or is_bound_to_vrf or is_ipv6_link_local_enabled)
+    return can_remove
+
+def remove_router_interface_ip_address(config_db, interface_name, ipaddress_to_remove):
+    table_name = get_interface_table_name(interface_name)
+    keys = config_db.get_keys(table_name)
+
+    for key in keys:
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+
+        iface, ipaddress_string = key
+        if iface != interface_name:
+            continue
+
+        if ipaddress.ip_interface(ipaddress_string) == ipaddress_to_remove:
+            config_db.set_entry(table_name, (interface_name, ipaddress_string), None)
+
+def remove_router_interface(config_db, interface_name):
+    table_name = get_interface_table_name(interface_name)
+    config_db.set_entry(table_name, interface_name, None)
+
+def is_management_interface(interface_name):
+    return interface_name == "eth0"
 
 # This is our main entrypoint - the main 'config' command
 @click.group(cls=clicommon.AbbreviationGroup, context_settings=CONTEXT_SETTINGS)
@@ -3564,56 +3599,46 @@ def add(ctx, interface_name, ip_addr, gw):
             return
 
     try:
-        net = ipaddress.ip_network(ip_addr, strict=False)
-        if '/' not in ip_addr:
-            ip_addr = str(net)
+        ip_address = ipaddress.ip_interface(ip_addr)
+    except ValueError as err:
+        ctx.fail("IP address is not valid: {}".format(err))
 
-        ip_addr = validate_ip_mask(ctx, ip_addr)
-        if not ip_addr:
-            raise ValueError('')
+    if is_management_interface(interface_name):
+        # Configuring more than 1 IPv4 or more than 1 IPv6 address fails.
+        # Allow only one IPv4 and only one IPv6 address to be configured for IPv6.
+        # If a row already exist, overwrite it (by doing delete and add).
+        mgmtintf_key_list = _get_all_mgmtinterface_keys()
 
-        if interface_name == 'eth0':
+        for key in mgmtintf_key_list:
+            # For loop runs for max 2 rows, once for IPv4 and once for IPv6.
+            current_ip = ipaddress.ip_interface(key[1])
+            if (ip_address.version == current_ip.version):
+                # If user has configured IPv4/v6 address and the already available row is also IPv4/v6, delete it here.
+                config_db.set_entry("MGMT_INTERFACE", (interface_name, key[1]), None)
 
-            # Configuring more than 1 IPv4 or more than 1 IPv6 address fails.
-            # Allow only one IPv4 and only one IPv6 address to be configured for IPv6.
-            # If a row already exist, overwrite it (by doing delete and add).
-            mgmtintf_key_list = _get_all_mgmtinterface_keys()
+        # Set the new row with new value
+        if not gw:
+            config_db.set_entry("MGMT_INTERFACE", (interface_name, str(ip_address)), {"NULL": "NULL"})
+        else:
+            config_db.set_entry("MGMT_INTERFACE", (interface_name, str(ip_address)), {"gwaddr": gw})
+        mgmt_ip_restart_services()
 
-            for key in mgmtintf_key_list:
-                # For loop runs for max 2 rows, once for IPv4 and once for IPv6.
-                # No need to capture the exception since the ip_addr is already validated earlier
-                ip_input = ipaddress.ip_interface(ip_addr)
-                current_ip = ipaddress.ip_interface(key[1])
-                if (ip_input.version == current_ip.version):
-                    # If user has configured IPv4/v6 address and the already available row is also IPv4/v6, delete it here.
-                    config_db.set_entry("MGMT_INTERFACE", ("eth0", key[1]), None)
+        return
 
-            # Set the new row with new value
-            if not gw:
-                config_db.set_entry("MGMT_INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-            else:
-                config_db.set_entry("MGMT_INTERFACE", (interface_name, ip_addr), {"gwaddr": gw})
-            mgmt_ip_restart_services()
-
-            return
-
-        table_name = get_interface_table_name(interface_name)
-        if table_name == "":
-            ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
-        interface_entry = config_db.get_entry(table_name, interface_name)
-        if len(interface_entry) == 0:
-            if table_name == "VLAN_SUB_INTERFACE":
-                config_db.set_entry(table_name, interface_name, {"admin_status": "up"})
-            else:
-                config_db.set_entry(table_name, interface_name, {"NULL": "NULL"})
-        config_db.set_entry(table_name, (interface_name, ip_addr), {"NULL": "NULL"})
-    except ValueError:
-        ctx.fail("ip address or mask is not valid.")
+    table_name = get_interface_table_name(interface_name)
+    if table_name == "":
+        ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
+    interface_entry = config_db.get_entry(table_name, interface_name)
+    if len(interface_entry) == 0:
+        if table_name == "VLAN_SUB_INTERFACE":
+            config_db.set_entry(table_name, interface_name, {"admin_status": "up"})
+        else:
+            config_db.set_entry(table_name, interface_name, {"NULL": "NULL"})
+    config_db.set_entry(table_name, (interface_name, str(ip_address)), {"NULL": "NULL"})
 
 #
 # 'del' subcommand
 #
-
 @ip.command()
 @click.argument('interface_name', metavar='<interface_name>', required=True)
 @click.argument("ip_addr", metavar="<ip_addr>", required=True)
@@ -3622,6 +3647,7 @@ def remove(ctx, interface_name, ip_addr):
     """Remove an IP address from the interface"""
     # Get the config_db connector
     config_db = ctx.obj['config_db']
+    namespace = ctx.obj['namespace'] if multi_asic.is_multi_asic() else None
 
     if clicommon.get_interface_naming_mode() == "alias":
         interface_name = interface_alias_to_name(config_db, interface_name)
@@ -3629,54 +3655,32 @@ def remove(ctx, interface_name, ip_addr):
             ctx.fail("'interface_name' is None!")
 
     try:
-        net = ipaddress.ip_network(ip_addr, strict=False)
-        if '/' not in ip_addr:
-            ip_addr = str(net)
-        
-        ip_addr = validate_ip_mask(ctx, ip_addr)
-        if not ip_addr:
-            raise ValueError('')
+        ip_address = ipaddress.ip_interface(ip_addr)
+    except ValueError as err:
+        ctx.fail("IP address is not valid: {}".format(err))
 
-        if interface_name == 'eth0':
-            config_db.set_entry("MGMT_INTERFACE", (interface_name, ip_addr), None)
-            mgmt_ip_restart_services()
-            return
+    if is_management_interface(interface_name):
+        remove_router_interface_ip_address(config_db, interface_name, ip_address)
+        mgmt_ip_restart_services()
+        return
 
-        table_name = get_interface_table_name(interface_name)
-        if table_name == "":
-            ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
-        interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
-        # If we deleting the last IP entry of the interface, check whether a static route present for the RIF
-        # before deleting the entry and also the RIF.
-        if len(interface_dependent) == 1 and interface_dependent[0][1] == ip_addr:
-            # Check both IPv4 and IPv6 routes.
-            ip_versions = [ "ip", "ipv6"]
-            for ip_ver in ip_versions:
-                # Compete the command and ask Zebra to return the routes.
-                # Scopes of all VRFs will be checked.
-                cmd = "show {} route vrf all static".format(ip_ver)
-                if multi_asic.is_multi_asic():
-                    output = bgp_util.run_bgp_command(cmd, ctx.obj['namespace'])
-                else:
-                    output = bgp_util.run_bgp_command(cmd)
-                # If there is output data, check is there a static route,
-                # bound to the interface.
-                if output != "":
-                    if any(interface_name in output_line for output_line in output.splitlines()):
-                        ctx.fail("Cannot remove the last IP entry of interface {}. A static {} route is still bound to the RIF.".format(interface_name, ip_ver))
-        config_db.set_entry(table_name, (interface_name, ip_addr), None)
-        interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
-        if len(interface_dependent) == 0 and is_interface_bind_to_vrf(config_db, interface_name) is False and get_intf_ipv6_link_local_mode(ctx, interface_name, table_name) != "enable":
-            config_db.set_entry(table_name, interface_name, None)
+    table_name = get_interface_table_name(interface_name)
+    if not table_name:
+        ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback/eth]")
 
-        if multi_asic.is_multi_asic():
-            command = "sudo ip netns exec {} ip neigh flush dev {} {}".format(ctx.obj['namespace'], interface_name, ip_addr)
-        else:
-            command = "ip neigh flush dev {} {}".format(interface_name, ip_addr)
-        clicommon.run_command(command)
-    except ValueError:
-        ctx.fail("ip address or mask is not valid.")
+    interface_addresses = get_interface_ipaddresses(config_db, interface_name)
+    # If we deleting the last IP entry of the interface, check whether a static route present for the RIF
+    # before deleting the entry and also the RIF.
+    if interface_addresses == {ip_address} and has_static_routes_attached(interface_name, namespace):
+        ctx.fail("Cannot remove the last IP entry of interface {}. "
+                 "A static route is still bound to the RIF.".format(interface_name))
 
+    remove_router_interface_ip_address(config_db, interface_name, ip_address)
+
+    if can_remove_router_interface(config_db, interface_name):
+        remove_router_interface(config_db, interface_name)
+
+    flush_ip_address_in_kernel(interface_name, ip_address)
 
 #
 # buffer commands and utilities
@@ -4057,8 +4061,9 @@ def bind(ctx, interface_name, vrf_name):
         config_db.get_entry(table_name, interface_name).get('vrf_name') == vrf_name:
         return
     # Clean ip addresses if interface configured
-    interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
-    for interface_del in interface_dependent:
+    interface_addresses = get_interface_ipaddresses(config_db, interface_name)
+    for ipaddress in interface_addresses:
+        interface_del = (interface_name, str(ipaddress))
         config_db.set_entry(table_name, interface_del, None)
     config_db.set_entry(table_name, interface_name, None)
     # When config_db del entry and then add entry with same key, the DEL will lost.
@@ -4095,8 +4100,9 @@ def unbind(ctx, interface_name):
         ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
     if is_interface_bind_to_vrf(config_db, interface_name) is False:
         return
-    interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
-    for interface_del in interface_dependent:
+    interface_ipaddresses = get_interface_ipaddresses(config_db, interface_name)
+    for ipaddress in interface_ipaddresses:
+        interface_del = (interface_name, str(ipaddress))
         config_db.set_entry(table_name, interface_del, None)
     config_db.set_entry(table_name, interface_name, None)
 
