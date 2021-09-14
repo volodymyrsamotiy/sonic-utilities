@@ -85,6 +85,8 @@ CFG_PORTCHANNEL_NAME_TOTAL_LEN_MAX = 15
 CFG_PORTCHANNEL_MAX_VAL = 9999
 CFG_PORTCHANNEL_NO="<0-9999>"
 
+CFG_MGMT_PREFIX = "eth"
+
 PORT_MTU = "mtu"
 PORT_SPEED = "speed"
 PORT_TPID = "tpid"
@@ -441,8 +443,7 @@ def del_interface_bind_to_vrf(config_db, vrf_name):
                 if 'vrf_name' in interface_dict[interface_name] and vrf_name == interface_dict[interface_name]['vrf_name']:
                     interface_ipaddresses = get_interface_ipaddresses(config_db, interface_name)
                     for ipaddress in interface_ipaddresses:
-                        interface_del = (interface_name, str(ipaddress))
-                        config_db.set_entry(table_name, interface_del, None)
+                        remove_router_interface_ip_address(config_db, interface_name, ipaddress)
                     config_db.set_entry(table_name, interface_name, None)
 
 def set_interface_naming_mode(mode):
@@ -931,23 +932,20 @@ def cache_arp_entries():
         open(restore_flag_file, 'w').close()
     return success
 
-def has_static_routes_attached(interface_name, namespace=None):
+def has_static_routes_attached(interface_name, namespace=''):
     """ Check if static route is attached to interface. """
 
     ip_versions = [ "ip", "ipv6"]
     for ip_ver in ip_versions:
         cmd = "show {} route vrf all static".format(ip_ver)
-        if namespace:
-            output = bgp_util.run_bgp_command(cmd, namespace)
-        else:
-            output = bgp_util.run_bgp_command(cmd)
+        output = bgp_util.run_bgp_command(cmd, namespace)
 
         if output:
             if any(interface_name in output_line for output_line in output.splitlines()):
                 return True
     return False
 
-def flush_ip_address_in_kernel(interface_name, ip_addr, namespace=None):
+def flush_ip_neigh_in_kernel(interface_name, ip_addr, namespace=''):
     if namespace:
         command = "sudo ip netns exec {} ip neigh flush dev {} {}".format(namespace, interface_name, ip_addr)
     else:
@@ -956,9 +954,9 @@ def flush_ip_address_in_kernel(interface_name, ip_addr, namespace=None):
 
 def can_remove_router_interface(config_db, interface_name):
     interface_addresses = get_interface_ipaddresses(config_db, interface_name)
-    is_bound_to_vrf = is_interface_bind_to_vrf(config_db, interface_name)
+    is_bound_to_non_default_vrf = is_interface_bind_to_vrf(config_db, interface_name)
     is_ipv6_link_local_enabled = is_interface_ipv6_link_local_only(config_db, interface_name)
-    can_remove = not (interface_addresses or is_bound_to_vrf or is_ipv6_link_local_enabled)
+    can_remove = not (interface_addresses or is_bound_to_non_default_vrf or is_ipv6_link_local_enabled)
     return can_remove
 
 def remove_router_interface_ip_address(config_db, interface_name, ipaddress_to_remove):
@@ -981,7 +979,7 @@ def remove_router_interface(config_db, interface_name):
     config_db.set_entry(table_name, interface_name, None)
 
 def is_management_interface(interface_name):
-    return interface_name == "eth0"
+    return interface_name.startswith(CFG_MGMT_PREFIX)
 
 # This is our main entrypoint - the main 'config' command
 @click.group(cls=clicommon.AbbreviationGroup, context_settings=CONTEXT_SETTINGS)
@@ -3647,7 +3645,7 @@ def remove(ctx, interface_name, ip_addr):
     """Remove an IP address from the interface"""
     # Get the config_db connector
     config_db = ctx.obj['config_db']
-    namespace = ctx.obj['namespace'] if multi_asic.is_multi_asic() else None
+    namespace = ctx.obj['namespace'] if multi_asic.is_multi_asic() else ''
 
     if clicommon.get_interface_naming_mode() == "alias":
         interface_name = interface_alias_to_name(config_db, interface_name)
@@ -3680,7 +3678,7 @@ def remove(ctx, interface_name, ip_addr):
     if can_remove_router_interface(config_db, interface_name):
         remove_router_interface(config_db, interface_name)
 
-    flush_ip_address_in_kernel(interface_name, ip_address)
+    flush_ip_neigh_in_kernel(interface_name, ip_address)
 
 #
 # buffer commands and utilities
@@ -4063,8 +4061,7 @@ def bind(ctx, interface_name, vrf_name):
     # Clean ip addresses if interface configured
     interface_addresses = get_interface_ipaddresses(config_db, interface_name)
     for ipaddress in interface_addresses:
-        interface_del = (interface_name, str(ipaddress))
-        config_db.set_entry(table_name, interface_del, None)
+        remove_router_interface_ip_address(config_db, interface_name, ipaddress)
     config_db.set_entry(table_name, interface_name, None)
     # When config_db del entry and then add entry with same key, the DEL will lost.
     if ctx.obj['namespace'] is DEFAULT_NAMESPACE:
@@ -4102,8 +4099,7 @@ def unbind(ctx, interface_name):
         return
     interface_ipaddresses = get_interface_ipaddresses(config_db, interface_name)
     for ipaddress in interface_ipaddresses:
-        interface_del = (interface_name, str(ipaddress))
-        config_db.set_entry(table_name, interface_del, None)
+        remove_router_interface_ip_address(config_db, interface_name, ipaddress)
     config_db.set_entry(table_name, interface_name, None)
 
 
