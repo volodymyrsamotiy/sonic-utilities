@@ -1061,7 +1061,8 @@ def users(verbose):
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
 @click.option('--allow-process-stop', is_flag=True, help="Dump additional data which may require system interruption")
 @click.option('--silent', is_flag=True, help="Run techsupport in silent mode")
-def techsupport(since, global_timeout, cmd_timeout, verbose, allow_process_stop, silent):
+@click.option('--redirect-stderr', '-r', is_flag=True, help="Redirect any intermediate error to STDERR")
+def techsupport(since, global_timeout, cmd_timeout, verbose, allow_process_stop, silent, redirect_stderr):
     """Gather information for troubleshooting"""
     cmd = "sudo timeout -s SIGTERM --foreground {}m".format(global_timeout)
 
@@ -1077,6 +1078,8 @@ def techsupport(since, global_timeout, cmd_timeout, verbose, allow_process_stop,
     if since:
         cmd += " -s '{}'".format(since)
     cmd += " -t {}".format(cmd_timeout)
+    if redirect_stderr:
+        cmd += " -r"
     run_command(cmd, display_cmd=verbose)
 
 
