@@ -339,13 +339,15 @@ def get_interface_ipaddresses(config_db, interface_name):
     """
     ipaddresses = set()
     table_name = get_interface_table_name(interface_name)
+    if not table_name:
+        return ipaddresses
 
     keys = config_db.get_keys(table_name)
     for key in keys:
         if isinstance(key, tuple) and len(key) == 2:
-            iface, ipaddr = key
+            iface, interface_ip = key
             if iface == interface_name:
-                ipaddresses.add(ipaddress.ip_interface(ipaddr))
+                ipaddresses.add(ipaddress.ip_interface(interface_ip))
 
     return ipaddresses
 
