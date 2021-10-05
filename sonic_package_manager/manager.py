@@ -550,7 +550,7 @@ class PackageManager:
                 feature_enabled = self.feature_registry.is_feature_enabled(old_feature)
 
                 if feature_enabled:
-                    self._systemctl_action(new_package, 'disable')
+                    self._systemctl_action(old_package, 'disable')
                     exits.callback(rollback(self._systemctl_action,
                                             old_package, 'enable'))
                     self._systemctl_action(old_package, 'stop')
@@ -579,10 +579,11 @@ class PackageManager:
                     self._get_installed_packages_and(old_package))
                 )
 
+                # If old feature was enabled, the user should have the new feature enabled as well.
                 if feature_enabled:
                     self._systemctl_action(new_package, 'enable')
                     exits.callback(rollback(self._systemctl_action,
-                                            old_package, 'disable'))
+                                            new_package, 'disable'))
                     self._systemctl_action(new_package, 'start')
                     exits.callback(rollback(self._systemctl_action,
                                             new_package, 'stop'))
@@ -598,7 +599,7 @@ class PackageManager:
 
                 if not skip_host_plugins:
                     self._install_cli_plugins(new_package)
-                    exits.callback(rollback(self._uninstall_cli_plugin, old_package))
+                    exits.callback(rollback(self._uninstall_cli_plugin, new_package))
 
                 self.docker.rmi(old_package.image_id, force=True)
 
