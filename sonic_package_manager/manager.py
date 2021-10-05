@@ -966,18 +966,6 @@ class PackageManager:
             for npu in range(self.num_npus):
                 run_command(f'systemctl {action} {name}@{npu}')
 
-    @staticmethod
-    def _get_cli_plugin_name(package: Package):
-        return utils.make_python_identifier(package.name) + '.py'
-
-    @classmethod
-    def _get_cli_plugin_path(cls, package: Package, command):
-        pkg_loader = pkgutil.get_loader(f'{command}.plugins')
-        if pkg_loader is None:
-            raise PackageManagerError(f'Failed to get plugins path for {command} CLI')
-        plugins_pkg_path = os.path.dirname(pkg_loader.path)
-        return os.path.join(plugins_pkg_path, cls._get_cli_plugin_name(package))
-
     def _install_cli_plugins(self, package: Package):
         for command in SONIC_CLI_COMMANDS:
             self._install_cli_plugin(package, command)
