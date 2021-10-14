@@ -551,8 +551,6 @@ def cmd_kdump_memory(verbose, memory):
             if memory != crash_kernel_in_cmdline or memory != memory_in_db or memory != memory_in_json:
                 cmd_kdump_enable(verbose)
                 print("Kdump updated memory will be only operational after the system reboots")
-        else:
-            num_dumps = get_kdump_num_dumps()
 
 ## Command: Set / Get num_dumps
 #
@@ -565,8 +563,6 @@ def cmd_kdump_num_dumps(verbose, num_dumps):
         print('\n'.join(lines))
     else:
         write_num_dumps(num_dumps)
-        kdump_enabled = get_kdump_administrative_mode()
-        kdump_memory = get_kdump_memory()
 
 ## Command: Display kdump status
 def cmd_kdump_status():
