@@ -16,6 +16,8 @@ def disable():
     if config_db is not None:
         config_db.connect()
         config_db.mod_entry("KDUMP", "config", {"enabled": "false"})
+        click.echo("KDUMP configuration changes may require a reboot to take effect.")
+        click.echo("Save SONiC configuration using 'config save' before issuing the reboot command.")
 
 @kdump.command()
 def enable():
@@ -24,6 +26,8 @@ def enable():
     if config_db is not None:
         config_db.connect()
         config_db.mod_entry("KDUMP", "config", {"enabled": "true"})
+        click.echo("KDUMP configuration changes may require a reboot to take effect.")
+        click.echo("Save SONiC configuration using 'config save' before issuing the reboot command.")
 
 @kdump.command()
 @click.argument('kdump_memory', metavar='<kdump_memory>', required=True)
@@ -33,6 +37,8 @@ def memory(kdump_memory):
     if config_db is not None:
         config_db.connect()
         config_db.mod_entry("KDUMP", "config", {"memory": kdump_memory})
+        click.echo("KDUMP configuration changes may require a reboot to take effect.")
+        click.echo("Save SONiC configuration using 'config save' before issuing the reboot command.")
 
 @kdump.command('num-dumps')
 @click.argument('kdump_num_dumps', metavar='<kdump_num_dumps>', required=True, type=int)
