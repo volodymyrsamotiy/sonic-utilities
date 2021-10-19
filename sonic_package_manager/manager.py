@@ -39,6 +39,7 @@ from sonic_package_manager.package import Package
 from sonic_package_manager.progress import ProgressManager
 from sonic_package_manager.reference import PackageReference
 from sonic_package_manager.registry import RegistryResolver
+from sonic_package_manager.service_creator import SONIC_CLI_COMMANDS
 from sonic_package_manager.service_creator.creator import (
     ServiceCreator,
     run_command
@@ -52,7 +53,6 @@ from sonic_package_manager.source import (
     RegistrySource,
     TarballSource
 )
-from sonic_package_manager.utils import DockerReference
 from sonic_package_manager.version import (
     Version,
     version_to_tag,
@@ -101,7 +101,7 @@ def opt_check(func: Callable) -> Callable:
     return wrapped_function
 
 
-def rollback(func, *args, **kwargs):
+def rollback(func, *args, **kwargs) -> Callable:
     """ Used in rollback callbacks to ignore failure
     but proceed with rollback. Error will be printed
     but not fail the whole procedure of rollback. """
@@ -131,13 +131,43 @@ def package_constraint_to_reference(constraint: PackageConstraint) -> PackageRef
     return PackageReference(package_name, version_to_tag(version))
 
 
-def parse_reference_expression(expression):
+def parse_reference_expression(expression) -> PackageReference:
     try:
         return package_constraint_to_reference(PackageConstraint.parse(expression))
     except ValueError:
         # if we failed to parse the expression as constraint expression
         # we will try to parse it as reference
         return PackageReference.parse(expression)
+
+
+def get_cli_plugin_directory(command: str) -> str:
+    """ Returns a plugins package directory for command group.
+
+    Args:
+        command: SONiC command: "show"/"config"/"clear".
+    Returns:
+        Path to plugins package directory.
+    """
+
+    pkg_loader = pkgutil.get_loader(f'{command}.plugins')
+    if pkg_loader is None:
+        raise PackageManagerError(f'Failed to get plugins path for {command} CLI')
+    plugins_pkg_path = os.path.dirname(pkg_loader.path)
+    return plugins_pkg_path
+
+
+def get_cli_plugin_path(package: Package, command: str) -> str:
+    """ Returns a path where to put CLI plugin code.
+
+    Args:
+        package: Package to generate this path for.
+        command: SONiC command: "show"/"config"/"clear".
+    Returns:
+        Path generated for this package.
+    """
+
+    plugin_module_file = package.name + '.py'
+    return os.path.join(get_cli_plugin_directory(command), plugin_module_file)
 
 
 def validate_package_base_os_constraints(package: Package, sonic_version_info: Dict[str, str]):
@@ -217,7 +247,7 @@ def validate_package_tree(packages: Dict[str, Package]):
                     continue
 
                 component_version = conflicting_package.components[component]
-                log.debug(f'conflicting package {dependency.name}: '
+                log.debug(f'conflicting package {conflict.name}: '
                           f'component {component} version is {component_version}')
 
                 if constraint.allows(component_version):
@@ -367,12 +397,17 @@ class PackageManager:
         if not self.database.has_package(package.name):
             self.database.add_package(package.name, package.repository)
 
+        service_create_opts = {
+            'state': feature_state,
+            'owner': default_owner,
+        }
+
         try:
             with contextlib.ExitStack() as exits:
                 source.install(package)
                 exits.callback(rollback(source.uninstall, package))
 
-                self.service_creator.create(package, state=feature_state, owner=default_owner)
+                self.service_creator.create(package, **service_create_opts)
                 exits.callback(rollback(self.service_creator.remove, package))
 
                 self.service_creator.generate_shutdown_sequence_files(
@@ -435,18 +470,23 @@ class PackageManager:
         # After all checks are passed we proceed to actual uninstallation
 
         try:
+            # Stop and disable the service.
+            # First to make sure we are not uninstalling
+            # package before the service has fully stopped
+            # since "config feature state" command is not blocking.
+            # Second, we make sure the service is in disabled state
+            # so that after reinstall and enablement hostcfgd will enable
+            # it and start it.
+            # TODO: once there is a way to block till hostcfgd will stop
+            # the service, replace it with new approach.
+            self._systemctl_action(package, 'stop')
+            self._systemctl_action(package, 'disable')
             self._uninstall_cli_plugins(package)
             self.service_creator.remove(package)
             self.service_creator.generate_shutdown_sequence_files(
                 self._get_installed_packages_except(package)
             )
-
-            # Clean containers based on this image
-            containers = self.docker.ps(filters={'ancestor': package.image_id},
-                                        all=True)
-            for container in containers:
-                self.docker.rm(container.id, force=True)
-
+            self.docker.rm_by_ancestor(package.image_id, force=True)
             self.docker.rmi(package.image_id, force=True)
             package.entry.image_id = None
         except Exception as err:
@@ -494,7 +534,6 @@ class PackageManager:
             )
 
         old_feature = old_package.manifest['service']['name']
-        new_feature = new_package.manifest['service']['name']
         old_version = old_package.manifest['package']['version']
         new_version = new_package.manifest['package']['version']
 
@@ -522,6 +561,13 @@ class PackageManager:
 
         # After all checks are passed we proceed to actual upgrade
 
+        service_create_opts = {
+            'register_feature': False,
+        }
+        service_remove_opts = {
+            'deregister_feature': False,
+        }
+
         try:
             with contextlib.ExitStack() as exits:
                 self._uninstall_cli_plugins(old_package)
@@ -530,24 +576,25 @@ class PackageManager:
                 source.install(new_package)
                 exits.callback(rollback(source.uninstall, new_package))
 
-                if self.feature_registry.is_feature_enabled(old_feature):
+                feature_enabled = self.feature_registry.is_feature_enabled(old_feature)
+
+                if feature_enabled:
+                    self._systemctl_action(old_package, 'disable')
+                    exits.callback(rollback(self._systemctl_action,
+                                            old_package, 'enable'))
                     self._systemctl_action(old_package, 'stop')
                     exits.callback(rollback(self._systemctl_action,
                                             old_package, 'start'))
 
-                self.service_creator.remove(old_package, deregister_feature=False)
+                self.service_creator.remove(old_package, **service_remove_opts)
                 exits.callback(rollback(self.service_creator.create, old_package,
-                                        register_feature=False))
+                                        **service_create_opts))
 
-                # Clean containers based on the old image
-                containers = self.docker.ps(filters={'ancestor': old_package.image_id},
-                                            all=True)
-                for container in containers:
-                    self.docker.rm(container.id, force=True)
+                self.docker.rm_by_ancestor(old_package.image_id, force=True)
 
-                self.service_creator.create(new_package, register_feature=False)
+                self.service_creator.create(new_package, **service_create_opts)
                 exits.callback(rollback(self.service_creator.remove, new_package,
-                                        register_feature=False))
+                                        **service_remove_opts))
 
                 self.service_creator.generate_shutdown_sequence_files(
                     self._get_installed_packages_and(new_package)
@@ -557,14 +604,27 @@ class PackageManager:
                     self._get_installed_packages_and(old_package))
                 )
 
-                if self.feature_registry.is_feature_enabled(new_feature):
+                # If old feature was enabled, the user should have the new feature enabled as well.
+                if feature_enabled:
+                    self._systemctl_action(new_package, 'enable')
+                    exits.callback(rollback(self._systemctl_action,
+                                            new_package, 'disable'))
                     self._systemctl_action(new_package, 'start')
                     exits.callback(rollback(self._systemctl_action,
                                             new_package, 'stop'))
 
+                # Update feature configuration after we have started new service.
+                # If we place it before the above, our service start/stop will
+                # interfere with hostcfgd in rollback path leading to a service
+                # running with new image and not the old one.
+                self.feature_registry.update(old_package.manifest, new_package.manifest)
+                exits.callback(rollback(
+                    self.feature_registry.update, new_package.manifest, old_package.manifest)
+                )
+
                 if not skip_host_plugins:
                     self._install_cli_plugins(new_package)
-                    exits.callback(rollback(self._uninstall_cli_plugin, old_package))
+                    exits.callback(rollback(self._uninstall_cli_plugin, new_package))
 
                 self.docker.rmi(old_package.image_id, force=True)
 
@@ -613,16 +673,16 @@ class PackageManager:
                          old_package_database: PackageDatabase,
                          dockerd_sock: Optional[str] = None):
         """
-        Migrate packages from old database. This function can do a comparison between 
-        current database and the database passed in as argument. If the package is 
-        missing in the current database it will be added. If the package is installed 
-        in the passed database and in the current it is not installed it will be 
-        installed with a passed database package version. If the package is installed 
-        in the passed database and it is installed in the current database but with 
-        older version the package will be upgraded to the never version. If the package 
-        is installed in the passed database and in the current it is installed but with 
-        never version - no actions are taken. If dockerd_sock parameter is passed, the 
-        migration process will use loaded images from docker library of the currently 
+        Migrate packages from old database. This function can do a comparison between
+        current database and the database passed in as argument. If the package is
+        missing in the current database it will be added. If the package is installed
+        in the passed database and in the current it is not installed it will be
+        installed with a passed database package version. If the package is installed
+        in the passed database and it is installed in the current database but with
+        older version the package will be upgraded to the never version. If the package
+        is installed in the passed database and in the current it is installed but with
+        never version - no actions are taken. If dockerd_sock parameter is passed, the
+        migration process will use loaded images from docker library of the currently
         installed image.
 
         Args:
@@ -743,7 +803,7 @@ class PackageManager:
             ref = parse_reference_expression(package_expression)
             return self.get_package_source(package_ref=ref)
         elif repository_reference:
-            repo_ref = DockerReference.parse(repository_reference)
+            repo_ref = utils.DockerReference.parse(repository_reference)
             repository = repo_ref['name']
             reference = repo_ref['tag'] or repo_ref['digest']
             reference = reference or 'latest'
@@ -774,8 +834,8 @@ class PackageManager:
                 if package_entry.default_reference is not None:
                     package_ref.reference = package_entry.default_reference
                 else:
-                    raise PackageManagerError(f'No default reference tag. '
-                                              f'Please specify the version or tag explicitly')
+                    raise PackageManagerError('No default reference tag. '
+                                              'Please specify the version or tag explicitly')
 
             return RegistrySource(package_entry.repository,
                                   package_ref.reference,
@@ -847,7 +907,7 @@ class PackageManager:
             Installed packages dictionary.
         """
 
-        return [self.get_installed_package(entry.name) 
+        return [self.get_installed_package(entry.name)
                 for entry in self.database if entry.installed]
 
     def _migrate_package_database(self, old_package_database: PackageDatabase):
@@ -906,38 +966,26 @@ class PackageManager:
             for npu in range(self.num_npus):
                 run_command(f'systemctl {action} {name}@{npu}')
 
-    @staticmethod
-    def _get_cli_plugin_name(package: Package):
-        return utils.make_python_identifier(package.name) + '.py'
-
-    @classmethod
-    def _get_cli_plugin_path(cls, package: Package, command):
-        pkg_loader = pkgutil.get_loader(f'{command}.plugins')
-        if pkg_loader is None:
-            raise PackageManagerError(f'Failed to get plugins path for {command} CLI')
-        plugins_pkg_path = os.path.dirname(pkg_loader.path)
-        return os.path.join(plugins_pkg_path, cls._get_cli_plugin_name(package))
-
     def _install_cli_plugins(self, package: Package):
-        for command in ('show', 'config', 'clear'):
+        for command in SONIC_CLI_COMMANDS:
             self._install_cli_plugin(package, command)
 
     def _uninstall_cli_plugins(self, package: Package):
-        for command in ('show', 'config', 'clear'):
+        for command in SONIC_CLI_COMMANDS:
             self._uninstall_cli_plugin(package, command)
 
     def _install_cli_plugin(self, package: Package, command: str):
         image_plugin_path = package.manifest['cli'][command]
         if not image_plugin_path:
             return
-        host_plugin_path = self._get_cli_plugin_path(package, command)
+        host_plugin_path = get_cli_plugin_path(package, command)
         self.docker.extract(package.entry.image_id, image_plugin_path, host_plugin_path)
 
     def _uninstall_cli_plugin(self, package: Package, command: str):
         image_plugin_path = package.manifest['cli'][command]
         if not image_plugin_path:
             return
-        host_plugin_path = self._get_cli_plugin_path(package, command)
+        host_plugin_path = get_cli_plugin_path(package, command)
         if os.path.exists(host_plugin_path):
             os.remove(host_plugin_path)
 
@@ -949,12 +997,17 @@ class PackageManager:
             PackageManager
         """
 
-        docker_api = DockerApi(docker.from_env())
+        docker_api = DockerApi(docker.from_env(), ProgressManager())
         registry_resolver = RegistryResolver()
-        return PackageManager(DockerApi(docker.from_env(), ProgressManager()),
+        metadata_resolver = MetadataResolver(docker_api, registry_resolver)
+        feature_registry = FeatureRegistry(SonicDB)
+        service_creator = ServiceCreator(feature_registry,
+                                         SonicDB)
+
+        return PackageManager(docker_api,
                               registry_resolver,
                               PackageDatabase.from_file(),
-                              MetadataResolver(docker_api, registry_resolver),
-                              ServiceCreator(FeatureRegistry(SonicDB), SonicDB),
+                              metadata_resolver,
+                              service_creator,
                               device_info,
                               filelock.FileLock(PACKAGE_MANAGER_LOCK_FILE, timeout=0))
