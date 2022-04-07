@@ -599,6 +599,13 @@ if [ -x ${LOG_SSD_HEALTH} ]; then
     ${LOG_SSD_HEALTH}
 fi
 
+# Stop any timers to prevent any containers starting in the middle of the process.
+TIMERS=$(systemctl list-dependencies --plain sonic-delayed.target | sed 1d)
+for timer in ${TIMERS}; do
+    debug "Stopping ${timer} ..."
+    systemctl stop ${timer}
+    debug "Stopped ${timer} ..."
+done
 
 # Kill nat docker after saving the conntrack table
 debug "Stopping nat ..."
@@ -682,25 +689,12 @@ debug "Stopping syncd ..."
 systemctl stop syncd || debug "Ignore stopping syncd service error $?"
 debug "Stopped  syncd ..."
 
-# Kill other containers to make the reboot faster
-# We call `docker kill ...` to ensure the container stops as quickly as possible,
-# then immediately call `systemctl stop ...` to prevent the service from
-# restarting the container automatically.
-debug "Stopping all remaining containers ..."
 if test -f /usr/local/bin/ctrmgr_tools.py
 then
+    debug "Stopping all remaining containers ..."
     /usr/local/bin/ctrmgr_tools.py kill-all
-else
-    for CONTAINER_NAME in $(docker ps --format '{{.Names}}'); do
-        CONTAINER_STOP_RC=0
-        docker kill $CONTAINER_NAME &> /dev/null || CONTAINER_STOP_RC=$?
-        systemctl stop $CONTAINER_NAME || debug "Ignore stopping $CONTAINER_NAME error $?"
-        if [[ CONTAINER_STOP_RC -ne 0 ]]; then
-            debug "Failed killing container $CONTAINER_NAME RC $CONTAINER_STOP_RC ."
-        fi
-    done
+    debug "Stopped all remaining containers ..."
 fi
-debug "Stopped all remaining containers ..."
 
 # Stop the docker container engine. Otherwise we will have a broken docker storage
 systemctl stop docker.service || debug "Ignore stopping docker service error $?"
